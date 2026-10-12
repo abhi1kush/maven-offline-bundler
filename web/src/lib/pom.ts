@@ -9,13 +9,24 @@ export type PomValidation =
   | { ok: true; coordinates: PomCoordinates; warning: string | null }
   | { ok: false; error: string };
 
-function localName(element: Element): string {
+function elementName(element: Element): string {
   return (element.localName || element.tagName).toLowerCase();
 }
 
+function elementChildren(parent: Element): Element[] {
+  const fromChildren = Array.from(parent.children ?? []);
+  if (fromChildren.length > 0) return fromChildren;
+  const elements: Element[] = [];
+  for (const node of Array.from(parent.childNodes)) {
+    if (node.nodeType === Node.ELEMENT_NODE) elements.push(node as Element);
+  }
+  return elements;
+}
+
 function directChild(parent: Element, name: string): Element | null {
-  for (const child of Array.from(parent.children)) {
-    if (localName(child) === name) return child;
+  const wanted = name.toLowerCase();
+  for (const child of elementChildren(parent)) {
+    if (elementName(child) === wanted) return child;
   }
   return null;
 }
@@ -32,10 +43,10 @@ export function validatePom(source: string): PomValidation {
 
   const doc = new DOMParser().parseFromString(xml, "application/xml");
   const root = doc.documentElement;
-  if (!root || localName(root) === "parsererror" || doc.querySelector("parsererror")) {
+  if (!root || elementName(root) === "parsererror" || doc.querySelector("parsererror")) {
     return { ok: false, error: "This file is not valid XML." };
   }
-  if (localName(root) !== "project") {
+  if (elementName(root) !== "project") {
     return { ok: false, error: "The root element must be <project>." };
   }
 
