@@ -3,5 +3,7 @@ dist
 .DS_Store
 *.log
 .vite
+__pycache__/
+*.pyc
 bundle-result.json
 maven-offline-bundle.zip
