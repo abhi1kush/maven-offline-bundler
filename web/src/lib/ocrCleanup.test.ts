@@ -85,6 +85,23 @@ describe("cleanupOcrText", () => {
     expect(cleaned).toContain("<artifactId>demo</artifactId>");
   });
 
+  it("repairs an extra l in schemaLocation and a zero inside the POM url", () => {
+    const text = [
+      "<project xmlns=\"http://maven.apache.org/P0OM/4.0.0\"",
+      "         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"",
+      "         xsi:schemalLocation=\"http://maven.apache.org/P0M/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">",
+      "  S   <modelVersion>4.0.0</modelVersion>",
+      "  <artifactId>demo</artifactId>",
+      "  <version>1.0</version>",
+      "</project>",
+    ].join("\n");
+    const cleaned = cleanupOcrText(text);
+    expect(cleaned).toContain("xmlns=\"http://maven.apache.org/POM/4.0.0\"");
+    expect(cleaned).toContain("xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\"");
+    expect(cleaned).toContain("<modelVersion>4.0.0</modelVersion>");
+    expect(cleaned).not.toMatch(/^\s*S\s+<modelVersion>/m);
+  });
+
   it("does not rewrite words outside versions", () => {
     const text = [
       "<project>",

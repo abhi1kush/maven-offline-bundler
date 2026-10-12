@@ -70,7 +70,27 @@ function dictionary(names: readonly string[]): Map<string, string> {
 }
 
 const TAGS = dictionary(POM_TAGS);
-const ATTRIBUTES = dictionary(ATTRIBUTE_NAMES);
+
+function attributeKey(name: string): string {
+  return confuse(name).replace(/i{2,}/g, "i");
+}
+
+function attributeDictionary(names: readonly string[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const name of names) {
+    const key = attributeKey(name);
+    const existing = map.get(key);
+    if (existing && existing !== name) map.set(key, "");
+    else map.set(key, name);
+  }
+  return map;
+}
+
+const ATTRIBUTES = attributeDictionary(ATTRIBUTE_NAMES);
+
+function canonicalAttribute(name: string): string {
+  return ATTRIBUTES.get(attributeKey(name)) || name;
+}
 
 export function tagKeyCollisions(): string[] {
   const seen = new Map<string, string>();
@@ -201,7 +221,7 @@ function repairTags(xml: string): string {
         (_match, lead: string, attrName: string, eq: string) => {
           const fixed = attrName
             .split(":")
-            .map((part) => canonical(part, ATTRIBUTES))
+            .map((part) => canonicalAttribute(part))
             .join(":");
           return `${lead}${fixed}${eq}`;
         },
@@ -249,7 +269,14 @@ function fixVersions(xml: string): string {
 }
 
 function fixCoordinateTokens(text: string): string {
-  return text.replace(/(^|[^A-Za-z0-9])0rg(?=[./\s<]|$)/g, "$1org").replace(/(^|[^A-Za-z0-9])c0m(?=[./\s<]|$)/g, "$1com");
+  return text
+    .replace(/(^|[^A-Za-z0-9])0rg(?=[./\s<]|$)/g, "$1org")
+    .replace(/(^|[^A-Za-z0-9])c0m(?=[./\s<]|$)/g, "$1com")
+    .replace(/maven\.apache\.org\/P[O0]{1,4}M\//g, "maven.apache.org/POM/");
+}
+
+function dropStrayGlyphs(text: string): string {
+  return text.replace(/^[ \t]*[A-Za-z|]{1,2}(?=[ \t]+<\/?[A-Za-z_])/gm, "");
 }
 
 function ensureXsi(xml: string): string {
@@ -269,7 +296,7 @@ function preparePart(part: string): string {
   const normalized = unescapeDominantEntities(
     normalizePunctuation(part.replace(/\r\n/g, "\n").replace(/\r/g, "\n")),
   );
-  return dropEditorChrome(stripEditorLineNumbers(normalized)).replace(/[ \t]+$/gm, "").trim();
+  return dropEditorChrome(dropStrayGlyphs(stripEditorLineNumbers(normalized))).replace(/[ \t]+$/gm, "").trim();
 }
 
 export function cleanupOcrParts(parts: string[]): string {
