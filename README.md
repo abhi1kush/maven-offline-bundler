@@ -48,4 +48,4 @@ npm install
 npm run dev
 ```
 
-The dev server serves the app at `http://localhost:5173/maven-offline-bundler/`. `npm run build` writes `dist/`, which the Pages workflow publishes.
+Sources live in `web/`. The dev server serves the app at `http://localhost:5173/maven-offline-bundler/`. `npm run build` writes `dist/`, which the Pages workflow publishes.
