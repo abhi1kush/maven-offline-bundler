@@ -82,7 +82,7 @@ jobs:
         run: python3 .github/scripts/publish.py --result "$RUNNER_TEMP/bundle-result.json"
 
       - name: Comment with the failure
-        if: steps.gate.outputs.run == 'true' && steps.build.outcome == 'failure'
+        if: failure() && steps.gate.outputs.run == 'true' && steps.build.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .github/scripts/publish.py --result "$RUNNER_TEMP/bundle-result.json" --failure
