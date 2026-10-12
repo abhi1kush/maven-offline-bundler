@@ -48,6 +48,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Switch Pages to workflow builds
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
