@@ -1,0 +1,83 @@
+name: Bundle Maven dependencies
+
+on:
+  issues:
+    types: [opened, edited, labeled]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: bundle-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    if: >-
+      (github.event.action != 'labeled' || github.event.label.name == 'bundle-request') &&
+      (
+        contains(github.event.issue.labels.*.name, 'bundle-request') ||
+        startsWith(github.event.issue.title, 'Bundle:')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Skip redundant label event on a new issue
+        id: gate
+        run: |
+          python3 - << 'PY'
+          import json, os
+          from datetime import datetime, timezone
+          event = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
+          run = True
+          if event.get("action") == "labeled":
+              created = datetime.fromisoformat(event["issue"]["created_at"].replace("Z", "+00:00"))
+              age = (datetime.now(timezone.utc) - created).total_seconds()
+              if age < 180:
+                  run = False
+          path = os.environ["GITHUB_OUTPUT"]
+          with open(path, "a", encoding="utf-8") as handle:
+              handle.write(f"run={'true' if run else 'false'}\n")
+          print(f"run={run}")
+          PY
+
+      - name: Resolve dependencies and zip the repository
+        id: build
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          python3 .github/scripts/bundle.py \
+            --event "$GITHUB_EVENT_PATH" \
+            --sha "${GITHUB_SHA::7}" \
+            --out "$RUNNER_TEMP/maven-offline-bundle.zip" \
+            --result "$RUNNER_TEMP/bundle-result.json" \
+            --log "$RUNNER_TEMP/bundle.log"
+
+      - name: Publish release
+        if: steps.gate.outputs.run == 'true' && steps.build.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/publish.py --result "$RUNNER_TEMP/bundle-result.json"
+
+      - name: Comment with the failure
+        if: steps.gate.outputs.run == 'true' && steps.build.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/publish.py --result "$RUNNER_TEMP/bundle-result.json" --failure
+
+      - name: Upload Maven log
+        if: failure() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-log-${{ github.event.issue.number }}
+          path: ${{ runner.temp }}/bundle.log
+          if-no-files-found: ignore
