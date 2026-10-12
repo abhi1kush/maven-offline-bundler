@@ -1,0 +1,22 @@
+name: Ensure labels
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create bundle-request label
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create bundle-request \
+            --description "Request an offline Maven dependency bundle" \
+            --color B8431F \
+            --force
