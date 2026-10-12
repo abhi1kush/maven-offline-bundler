@@ -12,8 +12,10 @@ import {
   type Release,
 } from "./lib/github";
 import { formatOcrProgress, recognizePomImages } from "./lib/ocr";
-import { imagesFromClipboard, imagesFromFileList } from "./lib/pomImages";
+import { imagesFromClipboard, imagesFromFileList, isPomImage } from "./lib/pomImages";
 import { validatePom, type PomProblem } from "./lib/pom";
+import { assembleQrTexts, encodePom } from "./lib/qrFormat";
+import { decodeQrFiles, decodeQrImageData, renderQrDataUrls } from "./lib/qrImages";
 
 type ManualIssue = {
   url: string;
@@ -22,6 +24,14 @@ type ManualIssue = {
 };
 
 const MAX_IMAGES = 12;
+const MAX_QR_IMAGES = 48;
+
+type QrSheet = {
+  pom: string;
+  id: string;
+  checksum: string;
+  urls: string[];
+};
 
 async function copyText(value: string): Promise<boolean> {
   try {
@@ -53,12 +63,18 @@ function lineOffset(source: string, line: number): number {
 export function App() {
   const fileId = useId();
   const imageId = useId();
+  const qrFileId = useId();
   const pomRef = useRef<HTMLTextAreaElement>(null);
   const backdropRef = useRef<HTMLPreElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const captureRef = useRef<HTMLCanvasElement>(null);
   const ocrRun = useRef(0);
-  const runOcrRef = useRef<(files: File[]) => Promise<void>>(async () => {});
+  const qrRun = useRef(0);
+  const runImagesRef = useRef<(files: File[], mode: "qr" | "qr-or-ocr" | "ocr") => Promise<void>>(async () => {});
+  const cameraStop = useRef<(() => void) | null>(null);
+  const cameraStarting = useRef(false);
   const [pom, setPom] = useState("");
-  const [pomSource, setPomSource] = useState<"edit" | "ocr">("edit");
+  const [pomSource, setPomSource] = useState<"edit" | "ocr" | "qr">("edit");
   const [manual, setManual] = useState<ManualIssue | null>(null);
   const [copied, setCopied] = useState(false);
   const [releases, setReleases] = useState<Release[] | null>(null);
@@ -69,6 +85,14 @@ export function App() {
   const [ocrRunning, setOcrRunning] = useState(false);
   const [ocrProgress, setOcrProgress] = useState("");
   const [ocrError, setOcrError] = useState<string | null>(null);
+  const [qrRunning, setQrRunning] = useState(false);
+  const [qrProgress, setQrProgress] = useState("");
+  const [qrError, setQrError] = useState<string | null>(null);
+  const [qrNote, setQrNote] = useState<string | null>(null);
+  const [makingQr, setMakingQr] = useState(false);
+  const [qrSheet, setQrSheet] = useState<QrSheet | null>(null);
+  const [cameraOn, setCameraOn] = useState(false);
+  const busy = ocrRunning || qrRunning || makingQr || cameraOn;
 
   const validation = useMemo(() => validatePom(pom), [pom]);
   const prepared = useMemo(() => {
@@ -104,7 +128,7 @@ export function App() {
     return () => controller.abort();
   }, [reloadToken]);
 
-  function updatePom(next: string, source: "edit" | "ocr" = "edit") {
+  function updatePom(next: string, source: "edit" | "ocr" | "qr" = "edit") {
     setPom(next);
     setPomSource(source);
     setManual(null);
@@ -134,6 +158,7 @@ export function App() {
     ocrRun.current = run;
     setOcrRunning(true);
     setOcrError(null);
+    setQrNote(null);
     setOcrProgress("Reading image · loading OCR engine 0%");
     try {
       const text = await recognizePomImages(images, (update) => {
@@ -161,18 +186,218 @@ export function App() {
       }
     }
   }
-  runOcrRef.current = runOcr;
+
+  function applyReadyPom(text: string, source: "ocr" | "qr") {
+    updatePom(text, source);
+    const next = validatePom(text);
+    const problem = next.ok ? null : next.problems.find((item) => item.line);
+    if (problem?.line) requestAnimationFrame(() => focusProblem(problem, text));
+  }
+
+  async function applyQrTexts(texts: string[]) {
+    const assembled = await assembleQrTexts(texts);
+    if (assembled.status === "ready") {
+      setQrNote(null);
+      setQrError(null);
+      applyReadyPom(assembled.pom, "qr");
+      return;
+    }
+    if (assembled.status === "incomplete") {
+      setQrError(null);
+      setQrNote(assembled.message);
+      return;
+    }
+    setQrNote(null);
+    setQrError(assembled.message);
+  }
+
+  function stopCamera() {
+    cameraStop.current?.();
+    cameraStop.current = null;
+    setCameraOn(false);
+  }
+
+  async function runImages(files: File[], mode: "qr" | "qr-or-ocr" | "ocr") {
+    const images = files.filter((file) => file.size <= 15_000_000 && isPomImage(file));
+    if (mode === "ocr") {
+      await runOcr(images);
+      return;
+    }
+    if (images.length === 0) {
+      setQrError("Choose a PNG, JPG, or WebP image of a QR code.");
+      return;
+    }
+    if (images.length > MAX_QR_IMAGES) {
+      setQrError(`Use at most ${MAX_QR_IMAGES} QR images.`);
+      return;
+    }
+    stopCamera();
+    const run = qrRun.current + 1;
+    qrRun.current = run;
+    setQrRunning(true);
+    setQrError(null);
+    setQrProgress(`Reading QR image 1 of ${images.length}`);
+    try {
+      const texts: string[] = [];
+      for (let index = 0; index < images.length; index += 1) {
+        if (qrRun.current !== run) return;
+        setQrProgress(`Reading QR image ${index + 1} of ${images.length}`);
+        texts.push(...(await decodeQrFiles([images[index]])));
+      }
+      if (qrRun.current !== run) return;
+      if (texts.length === 0) {
+        if (mode === "qr-or-ocr") {
+          setQrRunning(false);
+          setQrProgress("");
+          await runOcr(images);
+          return;
+        }
+        setQrError("No QR code was found in those images.");
+        return;
+      }
+      await applyQrTexts(texts);
+    } catch (error) {
+      if (qrRun.current !== run) return;
+      setQrError(error instanceof Error ? error.message : "Could not read that QR code.");
+    } finally {
+      if (qrRun.current === run) {
+        setQrRunning(false);
+        setQrProgress("");
+      }
+    }
+  }
+  runImagesRef.current = runImages;
 
   useEffect(() => {
     function onPaste(event: ClipboardEvent) {
       const images = imagesFromClipboard(event.clipboardData);
       if (images.length === 0) return;
       event.preventDefault();
-      void runOcrRef.current(images);
+      void runImagesRef.current(images, "qr-or-ocr");
     }
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
   }, []);
+
+  useEffect(() => () => cameraStop.current?.(), []);
+
+  async function startCamera() {
+    if (cameraStop.current) {
+      stopCamera();
+      return;
+    }
+    if (cameraStarting.current) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setQrError("This browser has no camera API.");
+      return;
+    }
+    cameraStarting.current = true;
+    setQrError(null);
+    setQrNote(null);
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: "environment" } },
+      });
+    } catch {
+      cameraStarting.current = false;
+      setQrError("The camera could not be started.");
+      return;
+    }
+    const video = videoRef.current;
+    if (!video) {
+      cameraStarting.current = false;
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    video.srcObject = stream;
+    try {
+      await video.play();
+    } catch {
+      cameraStarting.current = false;
+      stream.getTracks().forEach((track) => track.stop());
+      video.srcObject = null;
+      setQrError("The camera could not be started.");
+      return;
+    }
+    setCameraOn(true);
+    const seen: string[] = [];
+    let stopped = false;
+    let pending = false;
+    const timer = window.setInterval(() => {
+      if (stopped || pending) return;
+      const capture = captureRef.current;
+      if (!capture || video.readyState < 2 || video.videoWidth === 0) return;
+      pending = true;
+      capture.width = video.videoWidth;
+      capture.height = video.videoHeight;
+      const context = capture.getContext("2d", { willReadFrequently: true });
+      if (!context) {
+        pending = false;
+        return;
+      }
+      context.drawImage(video, 0, 0);
+      const image = context.getImageData(0, 0, capture.width, capture.height);
+      void decodeQrImageData(image)
+        .then(async (texts) => {
+          if (stopped || texts.length === 0) return;
+          let changed = false;
+          for (const text of texts) {
+            if (!seen.includes(text)) {
+              seen.push(text);
+              changed = true;
+            }
+          }
+          if (!changed) return;
+          const assembled = await assembleQrTexts(seen);
+          if (stopped) return;
+          if (assembled.status === "ready") {
+            setQrNote(null);
+            setQrError(null);
+            applyReadyPom(assembled.pom, "qr");
+            stopCamera();
+            return;
+          }
+          if (assembled.status === "incomplete") {
+            setQrError(null);
+            setQrNote(assembled.message);
+            return;
+          }
+          setQrNote(null);
+          setQrError(assembled.message);
+        })
+        .catch((error: unknown) => {
+          if (stopped) return;
+          setQrError(error instanceof Error ? error.message : "Could not read that QR code.");
+        })
+        .finally(() => {
+          pending = false;
+        });
+    }, 350);
+    cameraStop.current = () => {
+      stopped = true;
+      window.clearInterval(timer);
+      stream.getTracks().forEach((track) => track.stop());
+      video.srcObject = null;
+    };
+    cameraStarting.current = false;
+  }
+
+  async function makeQr() {
+    if (!pom.trim() || busy) return;
+    setMakingQr(true);
+    setQrError(null);
+    try {
+      const bundle = await encodePom(pom);
+      const urls = await renderQrDataUrls(bundle.parts);
+      setQrSheet({ pom, id: bundle.id, checksum: bundle.checksum, urls });
+    } catch (error) {
+      setQrError(error instanceof Error ? error.message : "Could not make QR codes.");
+    } finally {
+      setMakingQr(false);
+    }
+  }
 
   function onFile(file: File | undefined) {
     if (!file) return;
@@ -203,9 +428,9 @@ export function App() {
           <p className="eyebrow">Offline Maven</p>
           <h1>maven-offline-bundler</h1>
           <p className="lede">
-            Paste a <code>pom.xml</code> or a screenshot of one. GitHub Actions resolves it from
-            Maven Central and publishes a zip in <code>~/.m2/repository</code> layout. Carry that
-            zip to a machine with no network and build with <code>mvn -o</code>.
+            Paste a <code>pom.xml</code>, a screenshot, or a QR code. GitHub Actions resolves it
+            from Maven Central and publishes a zip in <code>~/.m2/repository</code> layout. Carry
+            that zip to a machine with no network and build with <code>mvn -o</code>.
           </p>
         </div>
         <a className="repo-link" href="https://github.com/abhi1kush/maven-offline-bundler">
@@ -231,7 +456,7 @@ export function App() {
             setDragOver(false);
             const images = imagesFromFileList(event.dataTransfer.files);
             if (images.length > 0) {
-              void runOcr(images);
+              void runImages(images, "qr-or-ocr");
               return;
             }
             const file = event.dataTransfer.files?.[0];
@@ -239,14 +464,15 @@ export function App() {
               onFile(file);
               return;
             }
-            setOcrError("Drop a pom.xml or a PNG, JPG, or WebP screenshot.");
+            setQrError("Drop a pom.xml, a screenshot, or a QR image.");
           }}
         >
           <h2 id="pom-heading">Project pom</h2>
           <p className="hint">
             The browser only checks that this is XML with a Maven <code>project</code>. Resolution
             runs in Actions, so no token and no Maven Central request leave this page. A screenshot
-            is read in the browser. Several images are joined in the order you add them.
+            is read in the browser. QR images are read here too, including a set of codes for a
+            long pom. Nothing is submitted until you choose Create bundle.
           </p>
           <label className="field-label" htmlFor="pom-xml">
             pom.xml
@@ -307,11 +533,29 @@ export function App() {
               {ocrProgress}
             </p>
           ) : null}
+          {qrRunning || makingQr ? (
+            <p className="status ocr-progress" role="status">
+              {makingQr ? "Drawing QR codes…" : qrProgress}
+            </p>
+          ) : null}
           {ocrError ? <p className="error-note">{ocrError}</p> : null}
+          {qrError ? <p className="error-note">{qrError}</p> : null}
+          {qrNote ? (
+            <p className="status warn" role="status">
+              {qrNote}
+            </p>
+          ) : null}
           {pomSource === "ocr" && pom.trim() ? (
             <p className="hint ocr-note">
               {validation.ok
                 ? "Read from the image. Correct anything that looks wrong, then choose Create bundle."
+                : "Fix the highlighted lines, then choose Create bundle. Nothing is submitted automatically."}
+            </p>
+          ) : null}
+          {pomSource === "qr" && pom.trim() ? (
+            <p className="hint ocr-note">
+              {validation.ok
+                ? "Read from the QR code. Correct anything that looks wrong, then choose Create bundle."
                 : "Fix the highlighted lines, then choose Create bundle. Nothing is submitted automatically."}
             </p>
           ) : null}
@@ -335,7 +579,7 @@ export function App() {
           ) : null}
 
           <div className="actions">
-            <button className="primary" type="button" disabled={!validation.ok || ocrRunning} onClick={createBundle}>
+            <button className="primary" type="button" disabled={!validation.ok || busy} onClick={createBundle}>
               Create bundle
             </button>
             <label className="secondary" htmlFor={fileId}>
@@ -367,13 +611,87 @@ export function App() {
                 if (images.length > 0) void runOcr(images);
               }}
             />
-            <button className="ghost" type="button" onClick={() => updatePom(SPRING_BOOT_EXAMPLE)}>
+            <label className={`secondary${qrRunning ? " disabled" : ""}`} htmlFor={qrFileId}>
+              Upload QR
+            </label>
+            <input
+              id={qrFileId}
+              className="file-input"
+              type="file"
+              accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+              multiple
+              disabled={qrRunning}
+              onChange={(event) => {
+                const images = imagesFromFileList(event.target.files);
+                event.target.value = "";
+                if (images.length > 0) void runImages(images, "qr");
+              }}
+            />
+            <button className="ghost" type="button" onClick={() => void startCamera()} disabled={qrRunning || ocrRunning}>
+              {cameraOn ? "Stop camera" : "Scan camera"}
+            </button>
+            <button className="ghost" type="button" onClick={() => void makeQr()} disabled={!pom.trim() || busy}>
+              Make QR
+            </button>
+            <button className="ghost" type="button" onClick={() => updatePom(SPRING_BOOT_EXAMPLE)} disabled={busy}>
               Spring Boot example
             </button>
-            <button className="ghost" type="button" onClick={() => updatePom("")} disabled={!pom || ocrRunning}>
+            <button
+              className="ghost"
+              type="button"
+              onClick={() => {
+                stopCamera();
+                setQrSheet(null);
+                setQrNote(null);
+                setQrError(null);
+                updatePom("");
+              }}
+              disabled={(!pom && !cameraOn && !qrSheet) || ocrRunning || qrRunning || makingQr}
+            >
               Clear
             </button>
           </div>
+
+          <div className={cameraOn ? "camera-panel" : "qr-hidden"}>
+            <video ref={videoRef} autoPlay playsInline muted />
+            {cameraOn ? (
+              <p className="hint">Point the camera at a pom QR code. Scanning fills the editor and does not submit.</p>
+            ) : null}
+          </div>
+          <canvas ref={captureRef} className="qr-hidden" />
+
+          {qrSheet ? (
+            <section className="qr-sheet" aria-labelledby="qr-heading">
+              <h3 id="qr-heading">QR codes for this pom</h3>
+              <p className="hint">
+                {qrSheet.urls.length === 1
+                  ? "One code holds this pom."
+                  : `${qrSheet.urls.length} codes hold this pom. Scan them in any order.`}{" "}
+                Id <code>{qrSheet.id}</code>. Checksum <code>{qrSheet.checksum}</code>.
+              </p>
+              {qrSheet.pom !== pom ? (
+                <p className="status warn">The editor changed after these codes were made.</p>
+              ) : null}
+              <div className="qr-grid">
+                {qrSheet.urls.map((url, index) => (
+                  <figure className="qr-card" key={`${qrSheet.id}-${index}`}>
+                    <img src={url} alt={`QR code ${index + 1} of ${qrSheet.urls.length}`} />
+                    <figcaption>
+                      Part {index + 1} of {qrSheet.urls.length}
+                    </figcaption>
+                    <a download={`pom-qr-${index + 1}-of-${qrSheet.urls.length}.png`} href={url}>
+                      Download PNG
+                    </a>
+                  </figure>
+                ))}
+              </div>
+              <div className="actions">
+                <button className="ghost" type="button" onClick={() => window.print()}>
+                  Print sheet
+                </button>
+              </div>
+            </section>
+          ) : null}
 
           {manual ? (
             <div className="manual">
