@@ -20,7 +20,7 @@ Browsers cannot call Maven Central (no CORS), and the page never sees a token. R
 
 ## Create a bundle
 
-1. Open the site and paste a `pom.xml`, or upload the file.
+1. Open the site and paste a `pom.xml`, upload the file, or give it a screenshot. PNG, JPG, and WebP images can be chosen from a file picker, dropped onto the page, or pasted from the clipboard. Several images are read from first to last and joined. Text recognition runs in the browser and drops the result into the editor; fix anything it highlights, then continue. Nothing is submitted on its own.
 2. Choose **Create bundle**. That opens a GitHub issue titled `Bundle: groupId:artifactId:version` with the `bundle-request` label. The body is the pom inside an `xml` fence.
 3. If the prefilled URL would be longer than 7000 characters, the page shows the issue form (title and label only) and a button that copies the body.
 4. Actions resolves the pom, uploads `maven-offline-bundle.zip` to a release tagged `bundle-<issue#>-<shortsha>`, comments with the download link and size, and closes the issue.
@@ -45,6 +45,7 @@ The submitted pom is untrusted build input. The Maven process does not receive `
 
 ```sh
 npm install
+npm test
 npm run dev
 ```
 
