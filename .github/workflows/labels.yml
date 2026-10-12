@@ -17,6 +17,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh label create bundle-request \
+            --repo "${{ github.repository }}" \
             --description "Request an offline Maven dependency bundle" \
             --color B8431F \
             --force
